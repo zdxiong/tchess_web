@@ -1,0 +1,16 @@
+# Maven / 构建产物（勿提交，体积大且可再生）
+target/
+dist/
+$out/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 日志与临时
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db

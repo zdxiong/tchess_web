@@ -19,7 +19,7 @@ Q群：1094058444
 # 声明
 本项目基于 [GPLv3](https://github.com/sojourners/public-Xiangqi/blob/master/LICENSE) 协议开源，你可以自由下载、使用、复制修改，但需遵守开源协议内容，禁止未经授权用于商业用途！
 
-# 打包为 Windows exe（免 Launch4j）
+# 打包为 Windows可执行程序
 
 项目根目录提供 `build-exe.ps1`，一键将本程序打包为自包含 Windows exe。方案基于 JDK 自带的 `jpackage`，采用非模块化（classpath）模式，绕开 jlink 对 `onnxruntime` / `jnativehook` 等无 module-info 依赖的"自动模块"限制。
 
@@ -31,18 +31,9 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 pwsh .\build-exe.ps1
 ```
 
-## 环境要求
-
-+ JDK 21（脚本默认 `C:\Users\xiongzhendong\.jdks\ms-21.0.13.0.2`，不一致时修改脚本顶部 `$jdk`）
-+ Maven 3.9+（脚本默认 `C:\Users\xiongzhendong\AppData\Local\apache-maven-3.9.16\bin\mvn.cmd`，不一致时修改脚本顶部 `$mvn`）
 
 ## 产物
 
 + `dist\Xiangqi\Xiangqi.exe` —— 整个 `dist\Xiangqi` 目录即完整程序（自带 JRE），拷到任意 Windows 机器即可运行
 + 打包后默认暴露本机 WEB 端口 `http://127.0.0.1:8787/`，接口：`/api/fen`、`/api/analysis`、`/api/state`
 
-## 说明
-
-+ 脚本共 4 步：编译（自动切 JDK21）→ 收集运行期依赖 jar 到 `target\applib` → `jpackage` 生成 exe → 把 `src\main\resources` 下 `model/sound/ui/image/fxml/font/style` 复制进 `dist\Xiangqi\app\`
-+ 代码用 `PathUtils.getJarPath()` 按文件系统路径读取模型 / 音效 / 图片等资源，因此资源必须外置于 `app\` 下，否则 exe 无法启动
-+ 打包前脚本会自动关闭正在运行的旧实例（旧实例会占用 `app\` 下的 jar，导致无法覆盖 dist 目录），无需手动关闭

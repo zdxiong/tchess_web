@@ -1,4 +1,4 @@
-# build-exe.ps1
+﻿# build-exe.ps1
 # 用 jpackage 将 TCHESS 打包为自包含 Windows exe（免 Launch4j）。
 # 产物: dist\Xiangqi\Xiangqi.exe  —— 整个 dist\Xiangqi 目录即完整程序（含自带 JRE）。
 #
@@ -20,9 +20,11 @@ $mvn     = 'C:\Users\xiongzhendong\AppData\Local\apache-maven-3.9.16\bin\mvn.cmd
 $appName = 'Xiangqi'
 $mainCls = 'com.sojourners.chess.Main'
 $mainJarName = 'Xiangqi-1.0-SNAPSHOT.jar'                        # = artifactId-version.jar
+$icon    = Join-Path $root 'assets\x.ico'                        # exe 图标（.ico，jpackage 只接受 .ico）
 
 if (-not (Test-Path -LiteralPath $jdk))   { throw "找不到 JDK: $jdk" }
 if (-not (Test-Path -LiteralPath $mvn))   { throw "找不到 Maven: $mvn" }
+if (-not (Test-Path -LiteralPath $icon))  { throw "找不到图标: $icon" }
 if (-not (Test-Path -LiteralPath (Join-Path $root 'pom.xml'))) { throw "不是项目根: $root" }
 
 $env:JAVA_HOME = $jdk
@@ -78,7 +80,7 @@ if (Test-Path -LiteralPath $outDir) { Remove-Item -LiteralPath $outDir -Recurse 
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
 Write-Host '==> [3/4] jpackage --type app-image'
-& $jpackage --type app-image --name $appName --input $applib --main-jar $mainJarName --main-class $mainCls --dest $dest
+& $jpackage --type app-image --name $appName --input $applib --main-jar $mainJarName --main-class $mainCls --dest $dest --icon $icon
 if ($LASTEXITCODE -ne 0) { throw 'jpackage 失败' }
 
 # ---------- 4. 外置资源复制进 app\ ----------

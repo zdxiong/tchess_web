@@ -195,6 +195,18 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
      */
     private List<String> tacticList;
 
+    /**
+     * 分析模式锁定主变（不漂移）：仅对当前局面锁定，走子/换局面后清除。
+     * lockedPvMove 为该局面的唯一对外推荐着法，lockedPvFen 为对应的局面 FEN(含行棋方)。
+     */
+    private volatile String lockedPvMove;
+    private volatile String lockedPvFen;
+
+    /** /api/move 最近一次执行过的着法与时间戳，用于重复调用去重 */
+    private volatile String lastAppliedMove;
+    private volatile long lastAppliedTs;
+    private static final long MOVE_DEDUP_WINDOW_MS = 1000;
+
     @FXML
     public void newButtonClick(ActionEvent event) {
         if (linkMode.getValue()) {
@@ -342,7 +354,7 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
             }
             engine.setThreadNum(prop.getThreadNum());
             engine.setHashSize(prop.getHashSize());
-            engine.setAnalysisModel(robotAnalysis.getValue() ? Engine.AnalysisModel.INFINITE : prop.getAnalysisModel(), prop.getAnalysisValue());
+            engine.setAnalysisModel(prop.getAnalysisModel(), prop.getAnalysisValue());
             engine.analysis(chessManualHandle.getFenCode(), chessManualHandle.getMoveList(), tacticList);
         }
     }
@@ -440,7 +452,10 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
 
         engine.setThreadNum(prop.getThreadNum());
         engine.setHashSize(prop.getHashSize());
-        engine.setAnalysisModel(robotAnalysis.getValue() ? Engine.AnalysisModel.INFINITE : prop.getAnalysisModel(), prop.getAnalysisValue());
+        // 分析模式与对弈统一使用用户配置的分析模型（默认固定时间 5000ms），一次性搜索，主变稳定不漂移；
+        // 分析模式下库招仅展示不自动出招，避免被开局库短路导致无引擎推荐
+        engine.setAutoBookMove(!robotAnalysis.getValue());
+        engine.setAnalysisModel(prop.getAnalysisModel(), prop.getAnalysisValue());
         engine.analysis(chessManualHandle.getFenCode(), chessManualHandle.getMoveList(), this.board.getBoard(), redGo);
     }
 
@@ -464,6 +479,8 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
 
     }
     private void goCallBack(String move) {
+        // 走子后局面已变化，清除旧局面的锁定主变
+        clearPv();
         // 记录棋谱
         List<String> nextList = chessManualHandle.boardMove(move, board.translate(move, true));
         board.setManualList(nextList);
@@ -932,6 +949,8 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
      * @param fenCode 传null 新建默认初始局面；传fenCode 则根据fen创建局面
      */
     private void newChessBoard(String fenCode, boolean fromManual) {
+        // 新建局面，清除主变锁定
+        clearPv();
         // 重置按钮
         robotRed.setValue(false);
         redButton.setDisable(false);
@@ -1203,6 +1222,8 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
 
                     if (td.getPv() == 1) {
                         chessManualHandle.setScore(td.getScore(), td.getMate());
+                        // 锁定当前局面的主变，保证同一局面多次轮询不漂移
+                        lockPv(td);
                     }
                 });
             }
@@ -1293,13 +1314,79 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
             return;
         }
         try {
-            webServer = new WebServer("127.0.0.1", prop.getHttpPort(), this::fetchSnapshot);
+            webServer = new WebServer("127.0.0.1", prop.getHttpPort(), this::fetchSnapshot, this::move);
             webServer.start();
             System.out.println("WEB服务已启动: http://" + webServer.getHost() + ":" + webServer.getPort()
-                    + "  当前对局FEN: /api/fen  分析: /api/analysis  合并快照: /api/state");
+                    + "  当前对局FEN: /api/fen  分析: /api/analysis  合并快照: /api/state  走子控制: POST /api/move");
         } catch (Exception e) {
             webServer = null;
             System.err.println("WEB服务启动失败(端口 " + prop.getHttpPort() + " 可能被占用): " + e.getMessage());
+        }
+    }
+
+    /**
+     * 观战模式下由外部(Python 直播脚本)通过 HTTP 接口控制走子。
+     * 仅观战模式允许；着法为引擎格式 4 字符(如 e2e4)，复用 goCallBack 走子链路。
+     * @return true 表示已接受走子指令
+     */
+    /**
+     * 观战模式走子控制接口：由调用方(Python 直播脚本)传入指定着法进行走子。
+     * 收到参数后校验盘面合法性（源棋子归属当前行棋方、符合走法规则、不送将），
+     * 并对同一着法做短窗口去重，避免重复走子导致 bug。走子成功后调用方可通过响应拿到该着法。
+     * @param move 引擎格式 4 字符着法，如 e2e4
+     * @return true 表示已接受该走子请求，false 表示非观战模式或着法格式非法
+     */
+    public boolean move(String move) {
+        if (!isWatchMode()) {
+            return false;
+        }
+        if (!isMoveFormat(move)) {
+            return false;
+        }
+        Platform.runLater(() -> applyMoveIfValid(move));
+        return true;
+    }
+
+    /** 校验引擎格式着法：4 字符，列 a-i，行 0-9 */
+    private boolean isMoveFormat(String move) {
+        if (move == null || move.length() != 4) {
+            return false;
+        }
+        char c0 = move.charAt(0), c1 = move.charAt(1), c2 = move.charAt(2), c3 = move.charAt(3);
+        return c0 >= 'a' && c0 <= 'i' && c2 >= 'a' && c2 <= 'i'
+                && c1 >= '0' && c1 <= '9' && c3 >= '0' && c3 <= '9';
+    }
+
+    /**
+     * 在 FX 线程上对推荐着法做去重 + 合法性校验后执行。
+     * 去重：同一着法在短时间窗内重复调用直接忽略，避免重复走子。
+     * 合法性：源位置必须有棋子且属于当前行棋方；符合中国象棋走法规则；不送将。
+     */
+    private void applyMoveIfValid(String move) {
+        if (move.equals(lastAppliedMove) && System.currentTimeMillis() - lastAppliedTs < MOVE_DEDUP_WINDOW_MS) {
+            return;
+        }
+        ChessBoard.Step s = board.stepForBoard(move);
+        if (s == null) {
+            return;
+        }
+        int x1 = s.getStart().getX(), y1 = s.getStart().getY();
+        int x2 = s.getEnd().getX(), y2 = s.getEnd().getY();
+        char piece = board.getBoard()[y1][x1];
+        // 合法性 1：源位置必须有棋子，且属于当前行棋方（轮到谁走谁才有推荐）
+        if (piece == ' ' || XiangqiUtils.isRed(piece) != redGo) {
+            return;
+        }
+        // 合法性 2：必须符合中国象棋走法规则
+        if (!XiangqiUtils.canGo(board.getBoard(), y1, x1, y2, x2)) {
+            return;
+        }
+        // 合法性 3：move(int...) 内部校验送将，非法(送将)时返回 null
+        String m = board.move(x1, y1, x2, y2);
+        if (m != null) {
+            lastAppliedMove = move;
+            lastAppliedTs = System.currentTimeMillis();
+            goCallBack(m);
         }
     }
 
@@ -1327,11 +1414,58 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
                 redGo,
                 isReverse.getValue(),
                 copy,
-                new ArrayList<>(listView.getItems()),
+                lockedLines(new ArrayList<>(listView.getItems())),
                 robotAnalysis.getValue(),
                 this.isThinking,
                 engine != null,
-                engine == null ? "" : prop.getEngineName());
+                engine == null ? "" : prop.getEngineName(),
+                isWatchMode());
+    }
+
+    /**
+     * 锁定主变过滤：同一局面下只对外输出 pv==1 的锁定主变（单一演化、不漂移）。
+     * 局面未变化时，即使引擎又算出别的着法，对外始终返回首次锁定的主变。
+     */
+    private List<ThinkData> lockedLines(List<ThinkData> src) {
+        if (lockedPvMove == null || lockedPvFen == null) {
+            return src;
+        }
+        if (!lockedPvFen.equals(board.fenCode(redGo))) {
+            return src;
+        }
+        List<ThinkData> out = new ArrayList<>();
+        for (ThinkData td : src) {
+            if (td.getPv() != null && td.getPv() == 1) {
+                ThinkData copy = new ThinkData();
+                copy.setPv(1);
+                copy.setDepth(td.getDepth());
+                copy.setScore(td.getScore());
+                copy.setMate(td.getMate());
+                copy.setNps(td.getNps());
+                copy.setTime(td.getTime());
+                List<String> detail = new ArrayList<>();
+                detail.add(lockedPvMove);
+                copy.setDetail(detail);
+                copy.setBody(td.getBody());
+                copy.setValid(true);
+                out.add(copy);
+            }
+        }
+        return out.isEmpty() ? src : out;
+    }
+
+    /** 锁定当前局面的主变着法 */
+    private void lockPv(ThinkData td) {
+        if (td.getDetail() != null && !td.getDetail().isEmpty()) {
+            lockedPvMove = td.getDetail().get(0);
+            lockedPvFen = board.fenCode(redGo);
+        }
+    }
+
+    /** 清除主变锁定（走子或新建局面后调用） */
+    private void clearPv() {
+        lockedPvMove = null;
+        lockedPvFen = null;
     }
 
     // ------------- 内嵌 WEB 服务 end -------------

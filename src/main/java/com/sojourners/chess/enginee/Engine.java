@@ -50,6 +50,12 @@ public class Engine {
 
     private int multiPV;
 
+    /**
+     * 是否允许开局库命中时直接自动出招。对弈模式为 true；分析模式为 false
+     * （分析模式库招仅展示，仍需引擎固定时间分析以产生推荐主变）。
+     */
+    private volatile boolean autoBookMove = true;
+
     public enum AnalysisModel {
         FIXED_TIME,
         FIXED_STEPS,
@@ -293,7 +299,9 @@ public class Engine {
                 List<BookData> results = OpenBookManager.getInstance().queryBook(board, redGo, moves.size() / 2 >= Properties.getInstance().getOffManualSteps());
                 System.out.println("查询库时间" + (System.currentTimeMillis() - s));
                 this.cb.showBookResults(results);
-                if (results.size() > 0 && this.analysisModel != AnalysisModel.INFINITE) {
+                // 仅在对弈模式(autoBookMove=true)下由库招直接出招并短路；
+                // 分析模式下库招只展示(bookTable)，仍继续引擎固定时间分析，保证有推荐主变
+                if (results.size() > 0 && this.autoBookMove) {
                     if (Properties.getInstance().getBookDelayEnd() > 0 && Properties.getInstance().getBookDelayEnd() >= Properties.getInstance().getBookDelayStart()) {
                         int t = random.nextInt(Properties.getInstance().getBookDelayStart(), Properties.getInstance().getBookDelayEnd());
                         sleep(t);
@@ -385,6 +393,10 @@ public class Engine {
     public void setAnalysisModel(AnalysisModel model, long v) {
         this.analysisModel = model;
         this.analysisValue = v;
+    }
+
+    public void setAutoBookMove(boolean autoBookMove) {
+        this.autoBookMove = autoBookMove;
     }
 
     public void close() {

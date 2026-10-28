@@ -24,7 +24,6 @@ public class CloudOpenBook implements OpenBook {
         try {
             String content = "action=queryall&board=" + URLEncoder.encode(fenCode, "UTF-8");
             String result = HttpUtils.sendByGet(URL, content, Properties.getInstance().getCloudBookTimeout());
-            System.out.println(result);
 
             if (StringUtils.isNotEmpty(result) && result.contains("move")) {
 

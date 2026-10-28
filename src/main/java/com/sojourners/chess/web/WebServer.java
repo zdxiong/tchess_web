@@ -8,13 +8,16 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Supplier;
 
 /**
- * 内嵌 HTTP 服务，供外部工具（如直播辅助脚本、浏览器）读取当前对局的 FEN 与引擎分析。
+ * 内嵌 HTTP 服务，供外部工具（如直播辅助脚本、浏览器）读取当前对局的 FEN 与引擎分析，
+ * 并在观战模式下提供走子控制接口。
  * <p>
  * 使用 JDK 自带 com.sun.net.httpserver，无需额外依赖。
  * <p>
@@ -24,16 +27,26 @@ import java.util.function.Supplier;
  *   GET /api/fen     当前局面 FEN + 行棋方 + 棋盘
  *   GET /api/analysis 当前引擎分析（多 PV）
  *   GET /api/state   fen 与 analysis 的合并快照
+ *   POST /api/move   观战模式下按指定着法走子，body: {"move":"e2e4"} 或 move=e2e4
  * </pre>
  */
 public class WebServer {
 
+    /**
+     * 观战模式走子控制回调。返回 true 表示已接受走子指令。
+     */
+    public interface MoveControl {
+        boolean move(String move);
+    }
+
     private final HttpServer server;
     private final Supplier<WebSnapshot> snapshotSupplier;
+    private final MoveControl moveControl;
     private final ExecutorService executor;
 
-    public WebServer(String host, int port, Supplier<WebSnapshot> snapshotSupplier) throws IOException {
+    public WebServer(String host, int port, Supplier<WebSnapshot> snapshotSupplier, MoveControl moveControl) throws IOException {
         this.snapshotSupplier = snapshotSupplier;
+        this.moveControl = moveControl;
         this.executor = Executors.newCachedThreadPool();
         this.server = HttpServer.create(new InetSocketAddress(host, port), 0);
         this.server.setExecutor(this.executor);
@@ -65,13 +78,17 @@ public class WebServer {
                 ex.sendResponseHeaders(204, -1);
                 return;
             }
+            String path = ex.getRequestURI().getPath();
+            if ("/api/move".equals(path)) {
+                handleMove(ex);
+                return;
+            }
             if (!"GET".equalsIgnoreCase(method)) {
                 addCors(ex);
                 send(ex, 405, "application/json; charset=utf-8",
                         "{\"error\":\"method not allowed, use GET\"}".getBytes(StandardCharsets.UTF_8));
                 return;
             }
-            String path = ex.getRequestURI().getPath();
             switch (path) {
                 case "/":
                 case "/index.html":
@@ -102,6 +119,79 @@ public class WebServer {
         } finally {
             ex.close();
         }
+    }
+
+    /**
+     * 处理观战模式走子控制：POST /api/move，body/query 传入引擎格式着法 move。
+     * 程序校验盘面合法性并做重复走子去重后落子，响应回传实际着法。
+     */
+    private void handleMove(HttpExchange ex) throws IOException {
+        addCors(ex);
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            send(ex, 405, "application/json; charset=utf-8",
+                    "{\"error\":\"method not allowed, use POST\"}".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        String move = extractMove(ex);
+        if (move == null) {
+            send(ex, 400, "application/json; charset=utf-8",
+                    "{\"error\":\"missing or invalid 'move'\"}".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        if (moveControl == null || !moveControl.move(move)) {
+            send(ex, 403, "application/json; charset=utf-8",
+                    "{\"error\":\"control not allowed (must be in watch mode)\"}".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        String body = "{\"ok\":true,\"move\":\"" + move + "\"}";
+        send(ex, 200, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 从 query / JSON body / form body 中提取 move 字段 */
+    private String extractMove(HttpExchange ex) throws IOException {
+        String query = ex.getRequestURI().getRawQuery();
+        if (query != null && !query.isEmpty()) {
+            String m = parseParams(query).get("move");
+            if (m != null && !m.isEmpty()) {
+                return m;
+            }
+        }
+        byte[] buf = ex.getRequestBody().readAllBytes();
+        String body = new String(buf, StandardCharsets.UTF_8).trim();
+        if (body.isEmpty()) {
+            return null;
+        }
+        if (body.startsWith("{")) {
+            int i = body.indexOf("move");
+            if (i < 0) {
+                return null;
+            }
+            int q = body.indexOf('"', i + 5);
+            if (q < 0) {
+                return null;
+            }
+            int q2 = body.indexOf('"', q + 1);
+            if (q2 < 0) {
+                return null;
+            }
+            return body.substring(q + 1, q2);
+        }
+        String m = parseParams(body).get("move");
+        return (m != null && !m.isEmpty()) ? m : null;
+    }
+
+    private Map<String, String> parseParams(String s) {
+        Map<String, String> map = new HashMap<>();
+        if (s == null || s.isEmpty()) {
+            return map;
+        }
+        for (String kv : s.split("&")) {
+            int eq = kv.indexOf('=');
+            if (eq > 0) {
+                map.put(kv.substring(0, eq), kv.substring(eq + 1));
+            }
+        }
+        return map;
     }
 
     private void addCors(HttpExchange ex) {
@@ -309,8 +399,10 @@ public class WebServer {
                 + "<li><code>GET /api/fen</code> — 当前局面 FEN、行棋方、棋盘</li>"
                 + "<li><code>GET /api/analysis</code> — 当前引擎分析（多 PV）</li>"
                 + "<li><code>GET /api/state</code> — FEN 与分析合并快照</li>"
+                + "<li><code>POST /api/move</code> — 观战模式下按指定着法走子（body: <code>{\"move\":\"e2e4\"}</code>）</li>"
                 + "</ul>"
-                + "<p>提示：要让 <code>/api/analysis</code> 有数据，需加载引擎并开启「分析模式」或让引擎参与走棋。</p>"
+                + "<p>提示：要让 <code>/api/analysis</code> 有数据，需加载引擎并开启「分析模式」或让引擎参与走棋；"
+                + "<code>/api/move</code> 仅在「观战模式」下可用。</p>"
                 + "<p><a href=\"" + fenUrl + "\">查看当前快照</a></p>"
                 + "</body></html>";
     }

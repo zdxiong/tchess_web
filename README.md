@@ -35,5 +35,5 @@ pwsh .\build-exe.ps1
 ## 产物
 
 + `dist\Xiangqi\Xiangqi.exe` —— 整个 `dist\Xiangqi` 目录即完整程序（自带 JRE），拷到任意 Windows 机器即可运行
-+ 打包后默认暴露本机 WEB 端口 `http://127.0.0.1:8787/`，接口：`/api/fen`、`/api/analysis`、`/api/state`
++ 打包后默认暴露本机 WEB 端口 `http://127.0.0.1:8787/`，接口：`GET /api/fen`、`GET /api/analysis`、`GET /api/state`、`POST /api/move`（观战模式下按指定着法走子，body: `{"move":"e2e4"}`）
 

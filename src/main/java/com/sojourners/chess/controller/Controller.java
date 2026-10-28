@@ -55,6 +55,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -175,7 +176,7 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
 
     private SimpleObjectProperty<Boolean> robotRed = new SimpleObjectProperty<>(false);
     private SimpleObjectProperty<Boolean> robotBlack = new SimpleObjectProperty<>(false);
-    private SimpleObjectProperty<Boolean> robotAnalysis = new SimpleObjectProperty<>(false);
+    private SimpleObjectProperty<Boolean> robotAnalysis = new SimpleObjectProperty<>(true);
     private SimpleObjectProperty<Boolean> isReverse = new SimpleObjectProperty<>(false);
     private SimpleObjectProperty<Boolean> linkMode = new SimpleObjectProperty<>(false);
     private SimpleObjectProperty<Boolean> useOpenBook = new SimpleObjectProperty<>(false);
@@ -206,6 +207,15 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
     private volatile String lastAppliedMove;
     private volatile long lastAppliedTs;
     private static final long MOVE_DEDUP_WINDOW_MS = 1000;
+
+    /** 最近一次 /api/move 的执行诊断（GUI exe 无控制台，通过 /api/state 暴露给外部查看） */
+    private volatile String moveDiagnostics = "";
+
+    /** 记录 /api/move 诊断：打印到控制台（IDE 运行时可见）并存入 moveDiagnostics（/api/state 可见） */
+    private void logMove(String msg) {
+        System.out.println("[api-move] " + msg);
+        moveDiagnostics = msg;
+    }
 
     @FXML
     public void newButtonClick(ActionEvent event) {
@@ -719,6 +729,7 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         // 库招表
         initBookTable();
         // 引擎view
+        ensureDefaultEngine();
         initEngineView();
         // 连线器
         initGraphLinker();
@@ -983,6 +994,82 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         System.gc();
     }
 
+    /**
+     * 确保默认引擎（皮卡鱼）存在于引擎列表并设为当前选中，程序启动时默认加载它。
+     * 引擎路径动态计算，不写死：在工作目录、jar/exe 目录及其向上几级中查找 engine 目录。
+     */
+    private void ensureDefaultEngine() {
+        String defaultPath = findDefaultEngine();
+        if (defaultPath == null) {
+            logMove("默认引擎未找到: 未在项目 engine 目录下发现 Pikafish 引擎");
+            return;
+        }
+        for (EngineConfig ec : prop.getEngineConfigList()) {
+            if (defaultPath.equals(ec.getPath())) {
+                prop.setEngineName(ec.getName());
+                return;
+            }
+        }
+        LinkedHashMap<String, String> options = new LinkedHashMap<>();
+        options.put("MultiPV", "1");
+        EngineConfig ec = new EngineConfig("皮卡鱼20260925", defaultPath, "uci", options);
+        prop.getEngineConfigList().add(ec);
+        prop.setEngineName("皮卡鱼20260925");
+    }
+
+    /**
+     * 动态查找默认引擎：从工作目录、jar/exe 目录及其向上回溯的目录中，
+     * 找到 engine 目录下第一个 Pikafish 引擎 exe。找不到返回 null。
+     */
+    private String findDefaultEngine() {
+        List<File> roots = new ArrayList<>();
+        roots.add(new File(System.getProperty("user.dir")));
+        String jarPath = PathUtils.getJarPath();
+        if (jarPath != null) {
+            roots.add(new File(jarPath));
+        }
+        // 向上回溯最多 4 级，覆盖 target/classes、dist/Xiangqi 等子目录
+        for (File r : new ArrayList<>(roots)) {
+            File p = r;
+            for (int i = 0; i < 4 && p != null; i++) {
+                p = p.getParentFile();
+                if (p != null) {
+                    roots.add(p);
+                }
+            }
+        }
+        for (File r : roots) {
+            File engineDir = new File(r, "engine");
+            if (engineDir.isDirectory()) {
+                File found = findEngineExe(engineDir);
+                if (found != null) {
+                    return found.getAbsolutePath();
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 递归查找目录下第一个 Pikafish 引擎 exe。 */
+    private File findEngineExe(File dir) {
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return null;
+        }
+        for (File f : files) {
+            if (f.isDirectory()) {
+                File r = findEngineExe(f);
+                if (r != null) {
+                    return r;
+                }
+            } else if (f.getName().toLowerCase().endsWith(".exe")
+                    && f.getName().toLowerCase().contains("pikafish")) {
+                return f;
+            }
+        }
+        return null;
+    }
+
     private void initEngineView() {
         // 引擎列表 线程数 哈希表大小
         refreshEngineComboBox();
@@ -1006,7 +1093,7 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
         }
 
         linkComboBox.getItems().addAll("自动走棋", "观战模式");
-        linkComboBox.setValue("自动走棋");
+        linkComboBox.setValue("观战模式");
     }
 
     private void refreshEngineComboBox() {
@@ -1364,21 +1451,26 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
      */
     private void applyMoveIfValid(String move) {
         if (move.equals(lastAppliedMove) && System.currentTimeMillis() - lastAppliedTs < MOVE_DEDUP_WINDOW_MS) {
+            logMove("忽略重复调用: " + move);
             return;
         }
         ChessBoard.Step s = board.stepForBoard(move);
         if (s == null) {
+            logMove("拒绝: 无法解析着法 " + move);
             return;
         }
         int x1 = s.getStart().getX(), y1 = s.getStart().getY();
         int x2 = s.getEnd().getX(), y2 = s.getEnd().getY();
         char piece = board.getBoard()[y1][x1];
-        // 合法性 1：源位置必须有棋子，且属于当前行棋方（轮到谁走谁才有推荐）
-        if (piece == ' ' || XiangqiUtils.isRed(piece) != redGo) {
+        // 合法性 1：源位置必须有棋子（观战模式由外部控制代走，调用方指定要走的着法；
+        // redGo 由连线识别推断可能不准，故不强校验 redGo 归属，重复走子靠去重 + 源空天然幂等防住）
+        if (piece == ' ') {
+            logMove("拒绝: 源位置无棋子 move=" + move + " 源=(" + x1 + "," + y1 + ")");
             return;
         }
         // 合法性 2：必须符合中国象棋走法规则
         if (!XiangqiUtils.canGo(board.getBoard(), y1, x1, y2, x2)) {
+            logMove("拒绝: 走法不合规 move=" + move);
             return;
         }
         // 合法性 3：move(int...) 内部校验送将，非法(送将)时返回 null
@@ -1387,7 +1479,44 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
             lastAppliedMove = move;
             lastAppliedTs = System.currentTimeMillis();
             goCallBack(m);
+            logMove("内部走子成功: " + move + " redGo=" + redGo
+                    + " linkMode=" + linkMode.getValue() + " graphLinker=" + (graphLinker != null));
+            // 连线观战模式：同步把着法点击到外部象棋平台（在非 FX 线程执行点击，
+            // 期间置 isThinking 暂停连线扫描，避免识别到外部变化后重复干预）
+            if (linkMode.getValue() && graphLinker != null) {
+                this.isThinking = true;
+                Thread.startVirtualThread(() -> {
+                    try {
+                        autoClickToLinker(x1, y1, x2, y2);
+                    } finally {
+                        this.isThinking = false;
+                    }
+                });
+            }
+        } else {
+            logMove("拒绝: 送将/非法 move=" + move);
         }
+    }
+
+    /**
+     * 将着法通过连线器点击到外部象棋平台。
+     * 坐标转换：观战模式用 isReverse 判断是否翻转（与自动走棋用 robotBlack=isReverse 一致）。
+     */
+    private void autoClickToLinker(int x1, int y1, int x2, int y2) {
+        if (graphLinker == null || !linkMode.getValue()) {
+            logMove("外部点击跳过: 未连线 linkMode=" + linkMode.getValue()
+                    + " graphLinker=" + (graphLinker != null));
+            return;
+        }
+        if (isReverse.getValue()) {
+            y1 = 9 - y1;
+            y2 = 9 - y2;
+            x1 = 8 - x1;
+            x2 = 8 - x2;
+        }
+        logMove("外部点击: (" + x1 + "," + y1 + ") -> (" + x2 + "," + y2 + ") isReverse=" + isReverse.getValue());
+        graphLinker.autoClick(x1, y1, x2, y2);
+        logMove("外部点击完成");
     }
 
     /**
@@ -1419,7 +1548,8 @@ public class Controller implements EngineCallBack, LinkerCallBack, ChessManualCa
                 this.isThinking,
                 engine != null,
                 engine == null ? "" : prop.getEngineName(),
-                isWatchMode());
+                isWatchMode(),
+                moveDiagnostics);
     }
 
     /**

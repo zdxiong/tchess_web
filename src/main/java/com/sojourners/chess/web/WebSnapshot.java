@@ -41,9 +41,13 @@ public class WebSnapshot {
     /** 是否处于观战模式（观战模式下允许外部通过 /api/move 控制走子） */
     public final boolean controlEnabled;
 
+    /** 最近一次 /api/move 的执行诊断（供外部查看走子被拒/外部点击等状态） */
+    public final String moveDiagnostics;
+
     public WebSnapshot(String fen, boolean redToMove, boolean isReverse, char[][] board,
                        List<ThinkData> lines, boolean analysisMode, boolean thinking,
-                       boolean engineLoaded, String engineName, boolean controlEnabled) {
+                       boolean engineLoaded, String engineName, boolean controlEnabled,
+                       String moveDiagnostics) {
         this.fen = fen;
         this.redToMove = redToMove;
         this.isReverse = isReverse;
@@ -54,5 +58,6 @@ public class WebSnapshot {
         this.engineLoaded = engineLoaded;
         this.engineName = engineName;
         this.controlEnabled = controlEnabled;
+        this.moveDiagnostics = moveDiagnostics;
     }
 }

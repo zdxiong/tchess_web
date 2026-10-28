@@ -255,6 +255,7 @@ public class WebServer {
         sb.append("\"board\":").append(boardJson(s.board)).append(',');
         sb.append("\"engineLoaded\":").append(s.engineLoaded).append(',');
         sb.append("\"engineName\":\"").append(escape(s.engineName == null ? "" : s.engineName)).append("\",");
+        sb.append("\"moveDiagnostics\":\"").append(escape(s.moveDiagnostics == null ? "" : s.moveDiagnostics)).append("\",");
         sb.append("\"analysisMode\":").append(s.analysisMode).append(',');
         sb.append("\"thinking\":").append(s.thinking).append(',');
         sb.append("\"analysis\":{");
